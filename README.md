@@ -1,4 +1,4 @@
-## Components of DRPAD
+![results](https://github.com/user-attachments/assets/10f73fb1-2151-410a-aef4-2730e1bcabd7)## Components of DRPAD
 ![main_img](img/main_image.jpg)
 ### Dynamic Prediction Replacement (DPR)
 To mitigate the propagation of anomalies, we introduce a dynamic prediction replacement mechanism. This component dynamically updates identified anomalous points with their predicted values, thereby suppressing their disruptive effects on future predictions and significantly enhancing overall detection performance.
@@ -94,6 +94,7 @@ Commands for training and testing models combined with DRPAD of all datasets are
 
 ## Results
 The experiment parameters of certain model under each data set are formated in the <model>.sh files in the directory ./scripts/. You can refer to these parameters for experiments, and you can also adjust the parameters to obtain better results.
+![result](img/results.png)
 
 ## Acknowledgement
 
