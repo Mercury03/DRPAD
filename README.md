@@ -1,4 +1,4 @@
-![results](https://github.com/user-attachments/assets/10f73fb1-2151-410a-aef4-2730e1bcabd7)## Components of DRPAD
+
 ![main_img](img/main_image.jpg)
 ### Dynamic Prediction Replacement (DPR)
 To mitigate the propagation of anomalies, we introduce a dynamic prediction replacement mechanism. This component dynamically updates identified anomalous points with their predicted values, thereby suppressing their disruptive effects on future predictions and significantly enhancing overall detection performance.
