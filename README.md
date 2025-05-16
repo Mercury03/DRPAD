@@ -2,12 +2,12 @@
 ![main_img](img/main_image.jpg)
 ## Dynamic Prediction Replacement (DPR)
 To mitigate the propagation of anomalies, we introduce a dynamic prediction replacement mechanism. This component dynamically updates identified anomalous points with their predicted values, thereby suppressing their disruptive effects on future predictions and significantly enhancing overall detection performance.
-![main_img](img/main_image.jpg)
+![alg](img/alg.png)
 ## Segmentation-Based Normalization via Change Point Detection(SN)
 To address distribution shifts, we propose a segmentation-based normalization approach. Specifically, the time series is divided into statistically independent segments using change point detection, and each segment is normalized individually. The segments are then reassembled to restore the original temporal structure. This process ensures a consistent statistical scale across segments, effectively mitigating the impact of distributional heterogeneity
 ## Mean \& Dimension Dual-Check Strategy(MDDC)
 To improve the detection of univariate anomalies, we develop a hybrid thresholding approach based on multidimensional sensitivity. This strategy combines global statistical indicators with per-dimension checks to better capture subtle and localized deviations.
-
+![equ](img/equ.png)
 
 
 
