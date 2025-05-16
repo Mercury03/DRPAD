@@ -9,11 +9,20 @@ from sklearn.preprocessing import StandardScaler
 
 warnings.filterwarnings('ignore')
 
+
 def process_SN(data, cp_file):
-    # Read the change point file
+    """
+    Perform segmented normalization on data
+    Args:
+        data: Data to be processed
+        cp_file: Change point file path
+    Returns:
+        processed_data: Data after segmented normalization
+    """
+    # Load change point file
     change_points = np.load(cp_file)
     
-    # Initialize the processed data list
+    # Initialize list for processed data
     processed_data = []
     data_copy = data.copy()
     
@@ -27,7 +36,7 @@ def process_SN(data, cp_file):
         for cp in change_points[dim]:
             cp = int(cp)  # Ensure change point is an integer
             if cp == 0 or cp > len(dim_data):
-                break
+                continue
             segments.append(dim_data[prev_cp:cp])
             prev_cp = cp
             
@@ -38,35 +47,39 @@ def process_SN(data, cp_file):
         scaler = StandardScaler()
         standardized_segments = []
         for segment in segments:
-            if len(segment) > 0:  # Check if segment is empty
+            if len(segment) > 0:  # Check if the segment is empty
                 standardized_segment = scaler.fit_transform(segment.reshape(-1, 1)).flatten()
                 standardized_segments.append(standardized_segment)
             else:
                 standardized_segments.append(segment)  # If segment is empty, keep as is
         
         # Concatenate standardized segments
-        processed_dim_data = np.concatenate(standardized_segments)
-        # If the concatenated length is greater than original, remove the excess
-        if len(processed_dim_data) > len(dim_data):
-            processed_dim_data = processed_dim_data[:len(dim_data)]
-
-        processed_data.append(processed_dim_data)
+        if standardized_segments:
+            processed_dim_data = np.concatenate(standardized_segments)
+            if len(processed_dim_data) > len(dim_data):
+                processed_dim_data = processed_dim_data[:len(dim_data)]
+            processed_data.append(processed_dim_data)
+        else:
+            processed_data.append(dim_data)  # If no valid segments, keep original data
     
     # Convert processed data to numpy array
-    return np.array(processed_data).T
+    processed_data = np.array(processed_data).T
+    
+    return processed_data
 
 
-class BaseDataset(Dataset):
-    """Base class for all datasets"""
-    def __init__(self, flag='train', input_len=0, data_path=None, data_process=True, N='LIN',
+class BaseTimeSeriesDataset(Dataset):
+    """
+    Base class for time series datasets
+    """
+    def __init__(self, flag='train', input_len=0, data_path='', data_process=True, N='LIN',
                  partial_train=False, ratio=0.2):
         # Basic information
         self.input_len = input_len
         self.N = N
-        
         if self.N == 'normal':
             self.scaler = StandardScaler()
-            
+        
         # Initialization
         assert flag in ['train', 'test', 'val']
         type_map = {'train': 0, 'val': 1, 'test': 2}
@@ -76,7 +89,7 @@ class BaseDataset(Dataset):
         self.partial_train = partial_train
         self.ratio = ratio if self.partial_train else 1
         
-        # Subclass implements specific data loading
+        # Data and labels
         self.train = None
         self.val = None
         self.test = None
@@ -84,7 +97,41 @@ class BaseDataset(Dataset):
         self.feature_map = None
         self.fc_struc = None
         self.fc_edge_index = None
-    
+
+    def process_data(self, data_train, data_test, train_cp_file=None, test_cp_file=None):
+        """
+        Process training and test data according to normalization method
+        """
+        # Process training data
+        data_train = np.nan_to_num(data_train)
+        if self.N == 'normal':
+            self.scaler.fit(data_train)
+            data_train = self.scaler.transform(data_train)
+            data_train = np.nan_to_num(data_train)
+        elif self.N == 'SN' and train_cp_file:
+            data_train = process_SN(data_train, cp_file=train_cp_file)
+            data_train = np.nan_to_num(data_train)
+        
+        # Split into training and validation sets
+        data_len = data_train.shape[0]
+        self.train = data_train[:int(data_len * 0.8 * self.ratio), :]
+        self.val = data_train[int(data_len * 0.8):, :]
+        
+        # Set feature mapping and build graph structure
+        self.feature_map = [i for i in range(data_train.shape[-1])]
+        self.fc_struc = self.get_fc_graph_struc()
+        self.fc_edge_index = self.build_loc_net()
+        self.fc_edge_index = torch.tensor(self.fc_edge_index, dtype=torch.float)
+        
+        # Process test data
+        self.test = np.nan_to_num(data_test)
+        if self.N == 'normal':
+            self.test = self.scaler.transform(self.test)
+            self.test = np.nan_to_num(self.test)
+        elif self.N == 'SN' and test_cp_file:
+            self.test = process_SN(self.test, cp_file=test_cp_file)
+            self.test = np.nan_to_num(self.test)
+
     def __getitem__(self, index):
         r_begin = index
         r_end = r_begin + self.input_len
@@ -95,7 +142,8 @@ class BaseDataset(Dataset):
         else:
             seq_x = self.test[r_begin:r_end]
         
-        return np.nan_to_num(seq_x)
+        seq_x = np.nan_to_num(seq_x)
+        return seq_x
 
     def __len__(self):
         if self.set_type == 0:
@@ -113,7 +161,7 @@ class BaseDataset(Dataset):
     
     def get_train(self):
         return self.train
-    
+
     def get_fc_graph_struc(self):
         struc_map = {}
         for ft in self.feature_map:
@@ -127,7 +175,6 @@ class BaseDataset(Dataset):
     def build_loc_net(self):
         index_feature_map = self.feature_map
         edge_indexes = [[], []]
-        
         for node_name, node_list in self.fc_struc.items():
             if node_name not in index_feature_map:
                 index_feature_map.append(node_name)
@@ -136,29 +183,15 @@ class BaseDataset(Dataset):
             for child in node_list:
                 if child not in index_feature_map:
                     print(f'error: {child} not in index_feature_map')
-                    continue
-
                 c_index = index_feature_map.index(child)
                 edge_indexes[0].append(c_index)
                 edge_indexes[1].append(p_index)
         return edge_indexes
-    
-    def process_data(self, data, is_train=True, cp_file=None):
-        """Common data processing method"""
-        data = np.nan_to_num(data)
-        
-        if self.N == 'normal':
-            if is_train:
-                self.scaler.fit(data)
-            data = self.scaler.transform(data)
-            
-        elif self.N == 'SN' and cp_file is not None:
-            data = process_SN(data, cp_file=cp_file)
-            
-        return np.nan_to_num(data)
 
 
-class Dataset_SMD(BaseDataset):
+
+class Dataset_SMD(BaseTimeSeriesDataset):
+
     def __init__(self, flag='train', input_len=0, data_path='./data/SMD', data_process=True, N='LIN',
                  partial_train=False, ratio=0.2):
         super().__init__(flag, input_len, data_path, data_process, N, partial_train, ratio)
@@ -176,28 +209,14 @@ class Dataset_SMD(BaseDataset):
         print('data_train:', data_train.shape)
         print('data_test:', data_test.shape)
         
-        # Process training data
         train_cp_file = './data/SMD/cp_list_all_SMD_train_improved.npy' if self.N == 'SN' else None
-        data_train = self.process_data(data_train, is_train=True, cp_file=train_cp_file)
-        print('data_train_processed:', data_train.shape)
-        
-        # Split training and validation sets
-        data_len = data_train.shape[0]
-        self.train = data_train[:int(data_len * 0.8 * self.ratio), :]
-        self.val = data_train[int(data_len * 0.8):, :]
-        
-        # Feature map and edge indices
-        self.feature_map = [i for i in range(data_train.shape[-1])]
-        self.fc_struc = self.get_fc_graph_struc()
-        self.fc_edge_index = self.build_loc_net()
-        self.fc_edge_index = torch.tensor(self.fc_edge_index, dtype=torch.float)
-
-        # Process test data
         test_cp_file = './data/SMD/cp_list_all_SMD_test_improved.npy' if self.N == 'SN' else None
-        self.test = self.process_data(data_test, is_train=False, cp_file=test_cp_file)
+        
+        self.process_data(data_train, data_test, train_cp_file, test_cp_file)
         self.test_labels = data_test_label
 
-class Dataset_MSL(BaseDataset):
+
+class Dataset_MSL(BaseTimeSeriesDataset):
     def __init__(self, flag='train', input_len=0, data_path='./data/MSL', data_process=True, N='LIN',
                  partial_train=False, ratio=0.2):
         super().__init__(flag, input_len, data_path, data_process, N, partial_train, ratio)
@@ -210,346 +229,240 @@ class Dataset_MSL(BaseDataset):
         
         if self.data_process:
             data_train = np.concatenate([data_train[:, :1], data_train[:, [2, 3, 5, 6, 7, 9, 11, 12, 13, 14, 15, 16,
-                                                                      17, 19, 20, 23, 27, 28, 29, 31, 33, 35, 39,
-                                                                      41, 42, 43, 45, 46, 47, 48, 49, 53, 54]]],
-                                    axis=1)
+                                                                        17, 19, 20, 23, 27, 28, 29, 31, 33, 35, 39,
+                                                                        41, 42, 43, 45, 46, 47, 48, 49, 53, 54]]],
+                                     axis=1)
             data_test = np.concatenate([data_test[:, :1], data_test[:, [2, 3, 5, 6, 7, 9, 11, 12, 13, 14, 15, 16,
-                                                                   17, 19, 20, 23, 27, 28, 29, 31, 33, 35, 39,
-                                                                   41, 42, 43, 45, 46, 47, 48, 49, 53, 54]]],
-                                   axis=1)
+                                                                     17, 19, 20, 23, 27, 28, 29, 31, 33, 35, 39,
+                                                                     41, 42, 43, 45, 46, 47, 48, 49, 53, 54]]],
+                                    axis=1)
         
-        # Process training data
         train_cp_file = './data/MSL/cp_list_all_MSL_train.npy' if self.N == 'SN' else None
-        data_train = self.process_data(data_train, is_train=True, cp_file=train_cp_file)
-        
-        # Split training and validation sets
-        data_len = data_train.shape[0]
-        self.train = data_train[:int(data_len * 0.8 * self.ratio), :]
-        self.val = data_train[int(data_len * 0.8):, :]
-        
-        # Feature map and edge indices
-        self.feature_map = [i for i in range(data_train.shape[-1])]
-        self.fc_struc = self.get_fc_graph_struc()
-        self.fc_edge_index = self.build_loc_net()
-        self.fc_edge_index = torch.tensor(self.fc_edge_index, dtype=torch.float)
-
-        # Process test data
         test_cp_file = './data/MSL/cp_list_all_MSL_test.npy' if self.N == 'SN' else None
-        self.test = self.process_data(data_test, is_train=False, cp_file=test_cp_file)
+        
+        self.process_data(data_train, data_test, train_cp_file, test_cp_file)
         self.test_labels = data_test_label
 
 
-class Dataset_SMAP(BaseDataset):
+class Dataset_SMAP(BaseTimeSeriesDataset):
+
     def __init__(self, flag='train', input_len=0, data_path='./data/SMAP', data_process=True, N='LIN',
                  partial_train=False, ratio=0.2):
         super().__init__(flag, input_len, data_path, data_process, N, partial_train, ratio)
         self.__read_data__()
 
     def __read_data__(self):
-        # Load data
         data_train = np.load(self.data_path + "/SMAP_train.npy")
         data_test = np.load(self.data_path + "/SMAP_test.npy")
         data_test_label = np.load(self.data_path + "/SMAP_test_label.npy")
 
-        # Data preprocessing
         if self.data_process:
             data_train = np.delete(data_train, 16, 1)
             data_test = np.delete(data_test, 16, 1)
         
-        # Process training data
-        train_cp_file = f'./data/SMAP/cp_list_all_SMAP_train.npy' if self.N == 'SN' else None
-        data_train = self.process_data(data_train, is_train=True, cp_file=train_cp_file)
+        train_cp_file = './data/SMAP/cp_list_all_SMAP_train.npy' if self.N == 'SN' else None
+        test_cp_file = './data/SMAP/cp_list_all_SMAP_test.npy' if self.N == 'SN' else None
         
-        # Split training and validation sets
-        data_len = data_train.shape[0]
-        self.train = data_train[:int(data_len * 0.8 * self.ratio), :]
-        self.val = data_train[int(data_len * 0.8):, :]
-        
-        # Feature map and edge indices
-        self.feature_map = [i for i in range(data_train.shape[-1])]
-        self.fc_struc = self.get_fc_graph_struc()
-        self.fc_edge_index = self.build_loc_net()
-        self.fc_edge_index = torch.tensor(self.fc_edge_index, dtype=torch.float)
-
-        # Process test data
-        test_cp_file = f'./data/SMAP/cp_list_all_SMAP_test.npy' if self.N == 'SN' else None
-        self.test = self.process_data(data_test, is_train=False, cp_file=test_cp_file)
+        self.process_data(data_train, data_test, train_cp_file, test_cp_file)
         self.test_labels = data_test_label
 
 
-class Dataset_PSM(BaseDataset):
+class Dataset_PSM(BaseTimeSeriesDataset):
+
     def __init__(self, flag='train', input_len=0, data_path='./data/PSM', data_process=True, N='LIN',
                  partial_train=False, ratio=0.2):
         super().__init__(flag, input_len, data_path, data_process, N, partial_train, ratio)
         self.__read_data__()
 
     def __read_data__(self):
-        # Load data
         data_train = pd.read_csv(self.data_path + '/train.csv').values[:, 1:]
         data_test = pd.read_csv(self.data_path + '/test.csv').values[:, 1:]
         data_test_label = pd.read_csv(self.data_path + '/test_label.csv').values[:, 1:]
 
-        # Process training data
-        train_cp_file = f'./data/PSM/cp_list_all_PSM_train.npy' if self.N == 'SN' else None
-        data_train = self.process_data(data_train, is_train=True, cp_file=train_cp_file)
+        train_cp_file = './data/PSM/cp_list_all_PSM_train.npy' if self.N == 'SN' else None
+        test_cp_file = './data/PSM/cp_list_all_PSM_test.npy' if self.N == 'SN' else None
         
-        # Split training and validation sets
-        data_len = data_train.shape[0]
-        self.train = data_train[:int(data_len * 0.8 * self.ratio), :]
-        self.val = data_train[int(data_len * 0.8):, :]
-        
-        # Feature map and edge indices
-        self.feature_map = [i for i in range(data_train.shape[-1])]
-        self.fc_struc = self.get_fc_graph_struc()
-        self.fc_edge_index = self.build_loc_net()
-        self.fc_edge_index = torch.tensor(self.fc_edge_index, dtype=torch.float)
-
-        # Process test data
-        test_cp_file = f'./data/PSM/cp_list_all_PSM_test.npy' if self.N == 'SN' else None
-        self.test = self.process_data(data_test, is_train=False, cp_file=test_cp_file)
+        self.process_data(data_train, data_test, train_cp_file, test_cp_file)
         self.test_labels = data_test_label
 
 
-class Dataset_SWaT(BaseDataset):
+class Dataset_SWaT(BaseTimeSeriesDataset):
+
     def __init__(self, flag='train', input_len=0, data_path='./data/SWaT', data_process=True, N='LIN',
                  partial_train=False, ratio=0.2):
         super().__init__(flag, input_len, data_path, data_process, N, partial_train, ratio)
         self.__read_data__()
 
     def __read_data__(self):
-        # Load data
         data_train = pd.read_csv(self.data_path + '/Normal.csv')
         data_test = pd.read_csv(self.data_path + '/Attack.csv')
         data_test_label = pd.read_csv(self.data_path + '/Attack.csv')
 
-        # Data preprocessing
         if self.data_process:
-            # Process column indices
             int_index = []
             for i in range(data_train.columns.shape[0]):
                 int_index.append(str(int(float(data_train.columns[i]))))
             data_train.columns = int_index
-            
             int_index.append(str(int(float(data_test.columns[-1]))))
             data_test.columns = int_index
-            
-            # Select specific columns
-            cols_dig = ['3', '4', '10', '13', '15', '20', '21', '22', '23', '24', '25', '31', '34', '43', '50']
-            cols_normal = ['1', '2', '6', '7', '8', '9', '17', '18', '19', '26', '27', '28', '29', '35', 
-                          '36', '37', '38', '39', '40', '41', '42', '45', '46', '47', '48']
-            
+            cols_dig = ['3', '4', '10', '13', '15', '20', '21', '22', '23', '24', '25', '31', '34',
+                        '43', '50']
+            cols_normal = ['1', '2', '6', '7', '8', '9', '17', '18', '19', '26', '27', '28', '29', '35', '36', '37',
+                           '38', '39', '40', '41', '42', '45', '46', '47', '48']
             data_train = data_train[cols_normal + cols_dig].values
             data_test = data_test[cols_normal + cols_dig].values
         else:
             data_train = data_train.values
             data_test = data_test.values[:, :-1]
-        
-        # Get test labels
+
         data_test_label = data_test_label.values[:, -1:]
-        
-        # Process training data
+
         train_cp_file = './data/SWaT/cp_list_all_SWaT_train.npy' if self.N == 'SN' else None
-        data_train = self.process_data(data_train, is_train=True, cp_file=train_cp_file)
-        
-        # Split training and validation sets
-        data_len = data_train.shape[0]
-        self.train = data_train[:int(data_len * 0.8 * self.ratio), :]
-        self.val = data_train[int(data_len * 0.8):, :]
-        
-        # Feature map and edge indices
-        self.feature_map = [i for i in range(data_train.shape[-1])]
-        self.fc_struc = self.get_fc_graph_struc()
-        self.fc_edge_index = self.build_loc_net()
-        self.fc_edge_index = torch.tensor(self.fc_edge_index, dtype=torch.float)
-        
-        # Process test data
         test_cp_file = './data/SWaT/cp_list_all_SWaT_test.npy' if self.N == 'SN' else None
-        self.test = self.process_data(data_test, is_train=False, cp_file=test_cp_file)
+        
+        self.process_data(data_train, data_test, train_cp_file, test_cp_file)
         self.test_labels = data_test_label
 
 
-class Dataset_WADI(BaseDataset):
+class Dataset_WADI(BaseTimeSeriesDataset):
+
     def __init__(self, flag='train', input_len=0, data_path='./data/WADI', data_process=True, N='LIN',
                  partial_train=False, ratio=0.2):
         super().__init__(flag, input_len, data_path, data_process, N, partial_train, ratio)
         self.__read_data__()
 
     def __read_data__(self):
-        # Load data
         data_train = pd.read_csv(self.data_path + '/Normal.csv')
         data_test = pd.read_csv(self.data_path + '/Attack.csv')
         data_test_label = pd.read_csv(self.data_path + '/Attack.csv')
 
-        # Data preprocessing
         if self.data_process:
-            # Process column indices
             int_index = []
             for i in range(data_train.columns.shape[0]):
                 int_index.append(str(int(float(data_train.columns[i]))))
             data_train.columns = int_index
-            
             int_index.append(str(int(float(data_test.columns[-1]))))
             data_test.columns = int_index
-            
-            # Select specific columns
-            cols_dig = ['10', '13', '14', '16', '18', '48', '49', '50', '51', '52', '53', '54', '55', '56', 
-                        '57', '58', '59', '71', '74', '76', '77', '78', '79', '80', '81', '83']
-            cols_normal = ['1', '2', '3', '4', '5', '6', '9', '20', '21', '22', '23', '24', '25', '26', '27', 
-                          '28', '29', '30', '31', '32', '33', '34', '35', '36', '37', '38', '39', '40', '41', 
-                          '42', '43', '44', '45', '46', '47', '60', '61', '63', '64', '65', '66', '67', '68', 
-                          '82', '84', '86', '87', '89', '90', '91', '98', '99', '100', '101', '102', '103', 
-                          '104', '105', '107', '108', '109', '110', '111', '113', '121', '123']
-            
+            cols_dig = ['10', '13', '14', '16', '18', '48', '49', '50', '51', '52', '53', '54', '55', '56', '57', '58',
+                        '59', '71', '74', '76', '77', '78', '79', '80', '81', '83']
+            cols_normal = ['1', '2', '3', '4', '5', '6', '9', '20', '21', '22', '23', '24', '25', '26', '27', '28',
+                           '29', '30', '31', '32',
+                           '33', '34', '35', '36', '37', '38', '39', '40', '41', '42', '43', '44', '45', '46', '47',
+                           '60', '61', '63',
+                           '64', '65', '66', '67', '68', '82', '84', '86', '87', '89', '90', '91', '98', '99', '100',
+                           '101', '102',
+                           '103', '104', '105', '107', '108', '109', '110', '111', '113', '121', '123']
             data_train = data_train[cols_normal + cols_dig].values
             data_test = data_test[cols_normal + cols_dig].values
         else:
             data_train = data_train.values
             data_test = data_test.values[:, :-1]
-        
-        # Get test labels
+
         data_test_label = data_test_label.values[:, -1:]
-        
-        # Process training data
+
         train_cp_file = './data/WADI/cp_list_all_WADI_train.npy' if self.N == 'SN' else None
-        data_train = self.process_data(data_train, is_train=True, cp_file=train_cp_file)
-        
-        # Split training and validation sets
-        data_len = data_train.shape[0]
-        self.train = data_train[:int(data_len * 0.8 * self.ratio), :]
-        self.val = data_train[int(data_len * 0.8):, :]
-        
-        # Feature map and edge indices
-        self.feature_map = [i for i in range(data_train.shape[-1])]
-        self.fc_struc = self.get_fc_graph_struc()
-        self.fc_edge_index = self.build_loc_net()
-        self.fc_edge_index = torch.tensor(self.fc_edge_index, dtype=torch.float)
-        
-        # Process test data
         test_cp_file = './data/WADI/cp_list_all_WADI_test.npy' if self.N == 'SN' else None
-        self.test = self.process_data(data_test, is_train=False, cp_file=test_cp_file)
+        
+        self.process_data(data_train, data_test, train_cp_file, test_cp_file)
         self.test_labels = data_test_label
 
 
-class Dataset_MBA(BaseDataset):
+class Dataset_MBA(BaseTimeSeriesDataset):
+
     def __init__(self, flag='train', input_len=0, data_path='./data/MBA', data_process=True, N='LIN',
                  partial_train=False, ratio=0.2):
         super().__init__(flag, input_len, data_path, data_process, N, partial_train, ratio)
         self.__read_data__()
 
     def __read_data__(self):
-        # Load data
         data_train = pd.read_excel(self.data_path + '/train.xlsx')
         data_test = pd.read_excel(self.data_path + '/test.xlsx')
         data_test_label = pd.read_excel(self.data_path + '/labels.xlsx')
 
-        # Preprocess data
         data_train = data_train.values[1:, 1:].astype(float)
         data_test = data_test.values[1:, 1:].astype(float)
-        
-        # Process training data
-        train_cp_file = './data/MBA/cp_list_all_MBA_train.npy' if self.N == 'SN' else None
-        data_train = self.process_data(data_train, is_train=True, cp_file=train_cp_file)
-        
-        # Split training and validation sets
-        data_len = data_train.shape[0]
-        self.train = data_train[:int(data_len * 0.8 * self.ratio), :]
-        self.val = data_train[int(data_len * 0.8):, :]
-
-        # Feature map and edge indices
-        self.feature_map = [i for i in range(data_train.shape[-1])]
-        self.fc_struc = self.get_fc_graph_struc()
-        self.fc_edge_index = self.build_loc_net()
-        self.fc_edge_index = torch.tensor(self.fc_edge_index, dtype=torch.float)
-        
-        # Process test data
         data_test_label = data_test_label.values[:, 1].astype(int)
+
+        train_cp_file = './data/MBA/cp_list_all_MBA_train.npy' if self.N == 'SN' else None
         test_cp_file = './data/MBA/cp_list_all_MBA_test.npy' if self.N == 'SN' else None
-        self.test = self.process_data(data_test, is_train=False, cp_file=test_cp_file)
         
-        # Special handling for test labels: MBA dataset has a window around labels
+        self.process_data(data_train, data_test, train_cp_file, test_cp_file)
+        
+
         labels = np.zeros_like(self.test)
         for i in range(-20, 20):
-            # Handle index out of bounds cases
-            valid_indices = np.clip(data_test_label + i, 0, labels.shape[0] - 1)
-            labels[valid_indices, :] = 1
+            labels[data_test_label + i, :] = 1
         self.test_labels = labels[:, :1]
 
 
-class Dataset_NAB(BaseDataset):
+class Dataset_UCR(BaseTimeSeriesDataset):
+
+    def __init__(self, flag='train', input_len=0, data_path='./data/UCR', data_process=True, N='LIN',
+                 partial_train=False, ratio=0.2):
+        super().__init__(flag, input_len, data_path, data_process, N, partial_train, ratio)
+        self.__read_data__()
+
+    def __read_data__(self):
+        file_name = '136_UCR_Anomaly_InternalBleeding17_1600_3198_3309.txt'
+        data = pd.read_csv(self.data_path + '/' + file_name, header=None)
+        vals = file_name.split('.')[0].split('_')
+        vals = vals[-3:]
+        self.vals = [int(i) for i in vals]
+        data_train = data.values[:self.vals[0]]
+        data_test = data.values[self.vals[0]:]
+
+        data_test_label = np.zeros_like(data_test)
+        data_test_label[self.vals[1] - self.vals[0]:self.vals[2] - self.vals[0]] = 1
+
+        train_cp_file = './data/UCR/cp_list_all_UCR_train.npy' if self.N == 'SN' else None
+        test_cp_file = './data/UCR/cp_list_all_UCR_test.npy' if self.N == 'SN' else None
+        
+        self.process_data(data_train, data_test, train_cp_file, test_cp_file)
+        self.test_labels = data_test_label
+
+
+class Dataset_NAB(BaseTimeSeriesDataset):
+
     def __init__(self, flag='train', input_len=0, data_path='./data/NAB', data_process=True, N='LIN',
                  partial_train=False, ratio=0.2):
         super().__init__(flag, input_len, data_path, data_process, N, partial_train, ratio)
         self.__read_data__()
 
     def __read_data__(self):
-        # Load data
         data = pd.read_csv(self.data_path + '/ec2_request_latency_system_failure.csv')
         data_train = data[['value']].values
         data_test = data[['value']].values
-        
-        # Load labels from JSON file
         data_test_label = np.zeros_like(data_test)
+        
+
         with open(self.data_path + '/labels.json') as f:
             labeldict = json.load(f)
-            
-        # Mark anomaly points with surrounding window
         for timestamp in labeldict['realKnownCause/ec2_request_latency_system_failure.csv']:
             tstamp = timestamp.replace('.000000', '')
             index = np.where(((data['timestamp'] == tstamp).values + 0) == 1)[0][0]
-            # Add context window
-            start_idx = max(0, index - 4)
-            end_idx = min(data_test_label.shape[0], index + 4)
-            data_test_label[start_idx:end_idx] = 1
+            data_test_label[index - 4:index + 4] = 1
 
-        # Process training data
         train_cp_file = './data/NAB/cp_list_all_NAB_train.npy' if self.N == 'SN' else None
-        data_train = self.process_data(data_train, is_train=True, cp_file=train_cp_file)
-        
-        # Split training and validation sets
-        data_len = data_train.shape[0]
-        self.train = data_train[:int(data_len * 0.8 * self.ratio), :]
-        self.val = data_train[int(data_len * 0.8):, :]
-        
-        # Feature map and edge indices
-        self.feature_map = [i for i in range(data_train.shape[-1])]
-        self.fc_struc = self.get_fc_graph_struc()
-        self.fc_edge_index = self.build_loc_net()
-        self.fc_edge_index = torch.tensor(self.fc_edge_index, dtype=torch.float)
-
-        # Process test data
         test_cp_file = './data/NAB/cp_list_all_NAB_test.npy' if self.N == 'SN' else None
-        self.test = self.process_data(data_test, is_train=False, cp_file=test_cp_file)
+        
+        self.process_data(data_train, data_test, train_cp_file, test_cp_file)
         self.test_labels = data_test_label
 
 
-class Dataset_MSDS(BaseDataset):
+class Dataset_MSDS(BaseTimeSeriesDataset):
+
     def __init__(self, flag='train', input_len=0, data_path='./data/MSDS', data_process=True, N='LIN',
                  partial_train=False, ratio=0.2):
         super().__init__(flag, input_len, data_path, data_process, N, partial_train, ratio)
         self.__read_data__()
 
     def __read_data__(self):
-        # Load data
         data_train = pd.read_csv(self.data_path + '/train.csv', header=None).values
         data_test = pd.read_csv(self.data_path + '/test.csv', header=None).values
         data_test_label = pd.read_csv(self.data_path + '/labels.csv', header=None).values
 
-        # Process training data
         train_cp_file = './data/MSDS/cp_list_all_MSDS_train.npy' if self.N == 'SN' else None
-        data_train = self.process_data(data_train, is_train=True, cp_file=train_cp_file)
-        
-        # Split training and validation sets
-        data_len = data_train.shape[0]
-        self.train = data_train[:int(data_len * 0.8 * self.ratio), :]
-        self.val = data_train[int(data_len * 0.8):, :]
-        
-        # Feature map and edge indices
-        self.feature_map = [i for i in range(data_train.shape[-1])]
-        self.fc_struc = self.get_fc_graph_struc()
-        self.fc_edge_index = self.build_loc_net()
-        self.fc_edge_index = torch.tensor(self.fc_edge_index, dtype=torch.float)
-
-        # Process test data
         test_cp_file = './data/MSDS/cp_list_all_MSDS_test.npy' if self.N == 'SN' else None
-        self.test = self.process_data(data_test, is_train=False, cp_file=test_cp_file)
+        
+        self.process_data(data_train, data_test, train_cp_file, test_cp_file)
         self.test_labels = data_test_label
