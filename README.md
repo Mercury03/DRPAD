@@ -100,5 +100,5 @@ The experiment parameters of certain model under each data set are formated in t
 
 This project is an improvement based on the AFMF framework. We would like to thank the authors of AFMF for sharing their datasets and data preprocessing scripts, which provided the foundation for our work.
 
-You can find the original AFMF repository here: [AFMF GitHub Repository]([https://github.com/xxx/AFMF](https://github.com/OrigamiSL/AFMF))
+You can find the original AFMF repository here: [AFMF GitHub Repository](https://github.com/OrigamiSL/AFMF)
 
